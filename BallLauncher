@@ -1,0 +1,615 @@
+using System.IO;
+using UnityEngine;
+using TMPro;
+
+[System.Serializable]
+public class ShotData
+{
+    public string shotType;
+    public string club;
+    public float clubHeadSpeedMph;
+    public float ballSpeedMph;
+    public float launchAngleDegrees;
+    public float sideAngleDegrees;
+    public float curveSpeedPerSecond;
+}
+
+public class BallLauncher : MonoBehaviour
+{
+    public Rigidbody golfBall;
+
+    [Header("UI")]
+    public TextMeshProUGUI clubSpeedText;
+    public TextMeshProUGUI clubText;
+    public TextMeshProUGUI ballSpeedText;
+    public TextMeshProUGUI shotTypeText;
+    public TextMeshProUGUI carryDistanceText;
+    public TextMeshProUGUI totalDistanceText;
+    public TextMeshProUGUI distanceToTargetText;
+
+    [Header("Live Shot Settings")]
+    public string currentClub = "";
+    public string currentShotType = "";
+    public float clubHeadSpeedMph = 0f;
+    public float ballSpeedMph = 80f;
+    public float launchAngleDegrees = 25f;
+    public float sideAngleDegrees = 0f;
+    public float curveSpeedPerSecond = 0f;
+
+    [Header("Camera")]
+    public CameraController cameraController;
+
+    [Header("Target")]
+    public Transform target;
+
+    [Header("Ball Spawn")]
+    public Transform ballSpawnPoint;
+    public float spawnHeightOffset = 0.03f;
+
+    [Header("Shot File Settings")]
+    public string shotFilePath = "ShotData/latest_shot.json";
+    public bool autoWatchShotFile = true;
+
+    [Header("Ground Roll")]
+    public float maxRollTimeAfterLanding = 2.0f;
+    [Range(0.80f, 0.999f)]
+    public float landedHorizontalDamping = 0.96f;
+
+    [Header("Mode")]
+    public bool drivingRangeMode = false;
+
+    private bool shotInFlight = false;
+    private string fullShotFilePath;
+    private System.DateTime lastFileWriteTime;
+
+    private Vector3 shotStartPosition;
+    private bool carryRecorded = false;
+    private bool totalRecorded = false;
+    private float carryDistance = 0f;
+    private float totalDistance = 0f;
+    private bool hasLanded = false;
+    private float groundRollTimer = 0f;
+
+    private Vector3 lastMovingVelocity = Vector3.zero;
+    private RigidbodyConstraints originalConstraints;
+    private Collider ballCollider;
+
+    void Awake()
+    {
+        if (golfBall != null)
+        {
+            originalConstraints = golfBall.constraints;
+            ballCollider = golfBall.GetComponent<Collider>();
+
+            golfBall.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            golfBall.interpolation = RigidbodyInterpolation.Interpolate;
+        }
+    }
+
+    void Start()
+    {
+        ResetBallToSpawn();
+
+        UpdateClubSpeedUI();
+        UpdateBallSpeedUI();
+        UpdateClubUI();
+        UpdateShotTypeUI();
+        UpdateDistanceUI();
+        UpdateDistanceToTargetUI();
+
+        fullShotFilePath = Path.Combine(Application.dataPath, "..", shotFilePath);
+
+        if (cameraController != null)
+        {
+            cameraController.ball = golfBall.transform;
+            cameraController.target = target;
+            cameraController.ResetToTeeView();
+        }
+
+        if (File.Exists(fullShotFilePath))
+        {
+            lastFileWriteTime = File.GetLastWriteTime(fullShotFilePath);
+            Debug.Log("Watching shot file: " + fullShotFilePath);
+        }
+        else
+        {
+            Debug.LogWarning("Shot file not found at startup: " + fullShotFilePath);
+        }
+    }
+
+    void Update()
+    {
+        HandleAimInput();
+        UpdateDistanceToTargetUI();
+
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            LaunchBall();
+        }
+
+        if (Input.GetKeyDown(KeyCode.R))
+        {
+            ResetBallToSpawn();
+        }
+
+        if (Input.GetKeyDown(KeyCode.L))
+        {
+            LoadShotFromJson();
+
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+
+            LaunchBall();
+        }
+
+        if (autoWatchShotFile)
+        {
+            CheckForShotFileUpdate();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha1))
+        {
+            SetShotPreset("Strait");
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+            LaunchBall();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha2))
+        {
+            SetShotPreset("Draw");
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+            LaunchBall();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha3))
+        {
+            SetShotPreset("Fade");
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+            LaunchBall();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha4))
+        {
+            SetShotPreset("ChunkStrait");
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+            LaunchBall();
+        }
+
+        if (Input.GetKeyDown(KeyCode.Alpha5))
+        {
+            SetShotPreset("Topped");
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+            LaunchBall();
+        }
+    }
+
+    void FixedUpdate()
+    {
+        if (shotInFlight)
+        {
+            ApplyCurve();
+            TrackShotStopping();
+        }
+    }
+
+    void HandleAimInput()
+    {
+        if (shotInFlight || cameraController == null)
+            return;
+
+        if (Input.GetKeyDown(KeyCode.LeftArrow))
+        {
+            cameraController.RotateAimLeft();
+        }
+
+        if (Input.GetKeyDown(KeyCode.RightArrow))
+        {
+            cameraController.RotateAimRight();
+        }
+    }
+
+    public void NotifyGroundImpact(Vector3 impactPosition)
+    {
+        if (!shotInFlight)
+            return;
+
+        if (carryRecorded)
+            return;
+
+        carryRecorded = true;
+        hasLanded = true;
+        groundRollTimer = 0f;
+
+        carryDistance = GetHorizontalDistance(shotStartPosition, impactPosition);
+        UpdateDistanceUI();
+
+        Debug.Log("Carry Distance: " + carryDistance.ToString("F2") + " m");
+    }
+
+    void UpdateClubSpeedUI()
+    {
+        if (clubSpeedText != null)
+        {
+            clubSpeedText.text = "Club Head Speed: " + clubHeadSpeedMph.ToString("F1") + " mph";
+        }
+    }
+
+    void UpdateClubUI()
+    {
+        if (clubText != null)
+        {
+            clubText.text = "Club: " + currentClub.ToUpper();
+        }
+    }
+
+    void UpdateBallSpeedUI()
+    {
+        if (ballSpeedText != null)
+        {
+            ballSpeedText.text = "Ball Speed: " + ballSpeedMph.ToString("F1") + " mph";
+        }
+    }
+
+    void UpdateShotTypeUI()
+    {
+        if (shotTypeText != null)
+        {
+            shotTypeText.text = "Shot Type: " + currentShotType.ToUpper();
+        }
+    }
+
+    void UpdateDistanceUI()
+    {
+        float carryYards = carryDistance * 1.09361f;
+        float totalYards = totalDistance * 1.09361f;
+
+        if (carryDistanceText != null)
+        {
+            carryDistanceText.text = "Carry: " + carryYards.ToString("F1") + " yds";
+        }
+
+        if (totalDistanceText != null)
+        {
+            totalDistanceText.text = "Total: " + totalYards.ToString("F1") + " yds";
+        }
+    }
+
+    void UpdateDistanceToTargetUI()
+    {
+        if (distanceToTargetText == null)
+            return;
+
+        if (target == null)
+        {
+            distanceToTargetText.text = "To Pin: NO TARGET";
+            return;
+        }
+
+        if (golfBall == null)
+        {
+            distanceToTargetText.text = "To Pin: NO BALL";
+            return;
+        }
+
+        float distanceMeters = GetHorizontalDistance(golfBall.transform.position, target.position);
+        float distanceYards = distanceMeters * 1.09361f;
+
+        distanceToTargetText.text = "To Pin: " + distanceYards.ToString("F1") + " yds";
+    }
+
+    void CheckForShotFileUpdate()
+    {
+        if (!File.Exists(fullShotFilePath))
+        {
+            return;
+        }
+
+        System.DateTime currentWriteTime = File.GetLastWriteTime(fullShotFilePath);
+
+        if (currentWriteTime > lastFileWriteTime)
+        {
+            lastFileWriteTime = currentWriteTime;
+
+            Debug.Log("Detected updated shot file. Loading new shot...");
+            LoadShotFromJson();
+
+            if (drivingRangeMode)
+                ResetBallToSpawn();
+
+            LaunchBall();
+        }
+    }
+
+    void LaunchBall()
+    {
+        if (golfBall == null)
+            return;
+
+        shotStartPosition = golfBall.transform.position;
+
+        carryRecorded = false;
+        totalRecorded = false;
+        hasLanded = false;
+        groundRollTimer = 0f;
+        carryDistance = 0f;
+        totalDistance = 0f;
+        lastMovingVelocity = Vector3.zero;
+
+        UpdateDistanceUI();
+
+        golfBall.constraints = originalConstraints;
+        golfBall.velocity = Vector3.zero;
+        golfBall.angularVelocity = Vector3.zero;
+        golfBall.WakeUp();
+
+        Vector3 currentPos = golfBall.position;
+        currentPos.y += spawnHeightOffset;
+
+        if (ballCollider != null)
+            ballCollider.enabled = false;
+
+        golfBall.position = currentPos;
+        Physics.SyncTransforms();
+
+        if (ballCollider != null)
+            ballCollider.enabled = true;
+
+        float speedMetersPerSecond = ballSpeedMph * 0.44704f;
+        float launchAngleRad = launchAngleDegrees * Mathf.Deg2Rad;
+
+        Vector3 aimDirection = Vector3.forward;
+
+        if (cameraController != null)
+        {
+            aimDirection = cameraController.GetAimDirection();
+        }
+
+        Vector3 shapedDirection = Quaternion.AngleAxis(sideAngleDegrees, Vector3.up) * aimDirection;
+
+        float horizontalSpeed = speedMetersPerSecond * Mathf.Cos(launchAngleRad);
+        float verticalSpeed = speedMetersPerSecond * Mathf.Sin(launchAngleRad);
+
+        Vector3 launchVelocity =
+            shapedDirection.normalized * horizontalSpeed +
+            Vector3.up * verticalSpeed;
+
+        golfBall.velocity = launchVelocity;
+        shotInFlight = true;
+
+        if (cameraController != null)
+        {
+            cameraController.ball = golfBall.transform;
+            cameraController.target = target;
+            cameraController.StartFollowCamera();
+        }
+
+        Debug.Log("Launched shot from: " + shotStartPosition);
+        Debug.Log("Ball Speed (mph): " + ballSpeedMph);
+        Debug.Log("Launch Angle: " + launchAngleDegrees);
+        Debug.Log("Side Angle: " + sideAngleDegrees);
+        Debug.Log("Curve: " + curveSpeedPerSecond);
+    }
+
+    void ApplyCurve()
+    {
+        if (hasLanded)
+            return;
+
+        Vector3 velocity = golfBall.velocity;
+        Vector3 horizontalVelocity = new Vector3(velocity.x, 0f, velocity.z);
+
+        if (horizontalVelocity.magnitude < 0.1f)
+            return;
+
+        Vector3 sidewaysDirection =
+            Vector3.Cross(Vector3.up, horizontalVelocity.normalized).normalized;
+
+        golfBall.velocity += sidewaysDirection * curveSpeedPerSecond * Time.fixedDeltaTime;
+    }
+
+    void TrackShotStopping()
+    {
+        if (!hasLanded || totalRecorded)
+            return;
+
+        groundRollTimer += Time.fixedDeltaTime;
+
+        Vector3 v = golfBall.velocity;
+        Vector3 horizontalVelocity = new Vector3(v.x, 0f, v.z);
+
+        if (horizontalVelocity.magnitude > 0.05f)
+        {
+            lastMovingVelocity = horizontalVelocity;
+        }
+
+        horizontalVelocity *= landedHorizontalDamping;
+        golfBall.velocity = new Vector3(horizontalVelocity.x, v.y, horizontalVelocity.z);
+
+        if (groundRollTimer >= maxRollTimeAfterLanding)
+        {
+            StopAndFreezeBall();
+        }
+    }
+
+    void StopAndFreezeBall()
+    {
+        golfBall.velocity = Vector3.zero;
+        golfBall.angularVelocity = Vector3.zero;
+        golfBall.constraints = RigidbodyConstraints.FreezeAll;
+        golfBall.Sleep();
+
+        totalRecorded = true;
+        shotInFlight = false;
+
+        totalDistance = GetHorizontalDistance(shotStartPosition, golfBall.transform.position);
+        UpdateDistanceUI();
+        UpdateDistanceToTargetUI();
+
+        if (cameraController != null)
+        {
+            cameraController.StopFollowCamera();
+            cameraController.ShowBallStopCamera(lastMovingVelocity);
+            cameraController.AutoAimToTarget();
+        }
+    }
+
+    float GetHorizontalDistance(Vector3 startPos, Vector3 endPos)
+    {
+        Vector3 startFlat = new Vector3(startPos.x, 0f, startPos.z);
+        Vector3 endFlat = new Vector3(endPos.x, 0f, endPos.z);
+        return Vector3.Distance(startFlat, endFlat);
+    }
+
+    void ResetBallToSpawn()
+    {
+        if (ballSpawnPoint != null)
+        {
+            Vector3 spawnPos = ballSpawnPoint.position;
+            spawnPos.y += spawnHeightOffset;
+
+            if (ballCollider != null)
+                ballCollider.enabled = false;
+
+            golfBall.position = spawnPos;
+            Physics.SyncTransforms();
+
+            if (ballCollider != null)
+                ballCollider.enabled = true;
+        }
+
+        golfBall.constraints = originalConstraints;
+        golfBall.velocity = Vector3.zero;
+        golfBall.angularVelocity = Vector3.zero;
+        golfBall.Sleep();
+
+        shotInFlight = false;
+        carryRecorded = false;
+        totalRecorded = false;
+        hasLanded = false;
+        groundRollTimer = 0f;
+        carryDistance = 0f;
+        totalDistance = 0f;
+        lastMovingVelocity = Vector3.zero;
+
+        UpdateDistanceUI();
+        UpdateDistanceToTargetUI();
+
+        if (cameraController != null)
+        {
+            cameraController.ball = golfBall.transform;
+            cameraController.target = target;
+            cameraController.ResetToTeeView();
+            cameraController.AutoAimToTarget();
+        }
+    }
+
+    void LoadShotFromJson()
+    {
+        if (!File.Exists(fullShotFilePath))
+        {
+            Debug.LogError("Shot file not found: " + fullShotFilePath);
+            return;
+        }
+
+        string json = File.ReadAllText(fullShotFilePath);
+        ShotData shot = JsonUtility.FromJson<ShotData>(json);
+
+        if (shot == null)
+        {
+            Debug.LogError("Failed to parse JSON.");
+            return;
+        }
+
+        currentShotType = shot.shotType;
+        currentClub = shot.club;
+        clubHeadSpeedMph = shot.clubHeadSpeedMph;
+        ballSpeedMph = shot.ballSpeedMph;
+        launchAngleDegrees = shot.launchAngleDegrees;
+        sideAngleDegrees = shot.sideAngleDegrees;
+        curveSpeedPerSecond = shot.curveSpeedPerSecond;
+
+        UpdateClubSpeedUI();
+        UpdateBallSpeedUI();
+        UpdateClubUI();
+        UpdateShotTypeUI();
+
+        Debug.Log("Loaded shot from JSON:");
+        Debug.Log("Path: " + fullShotFilePath);
+        Debug.Log("Shot Type: " + shot.shotType);
+        Debug.Log("Club: " + shot.club);
+        Debug.Log("Club Head Speed (mph): " + clubHeadSpeedMph);
+        Debug.Log("Ball Speed (mph): " + ballSpeedMph);
+        Debug.Log("Launch Angle: " + launchAngleDegrees);
+        Debug.Log("Side Angle: " + sideAngleDegrees);
+        Debug.Log("Curve: " + curveSpeedPerSecond);
+    }
+
+    void SetShotPreset(string shotType)
+    {
+        currentShotType = shotType;
+        currentClub = "7I";
+
+        switch (shotType)
+        {
+            case "Strait":
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 115f;
+                launchAngleDegrees = 16f;
+                sideAngleDegrees = 0f;
+                curveSpeedPerSecond = 0f;
+                break;
+
+            case "Draw":
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 113f;
+                launchAngleDegrees = 16f;
+                sideAngleDegrees = 2f;
+                curveSpeedPerSecond = -8f;
+                break;
+
+            case "Fade":
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 112f;
+                launchAngleDegrees = 16f;
+                sideAngleDegrees = -2f;
+                curveSpeedPerSecond = 8f;
+                break;
+
+            case "ChunkStrait":
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 75f;
+                launchAngleDegrees = 28f;
+                sideAngleDegrees = 0f;
+                curveSpeedPerSecond = 0f;
+                break;
+
+            case "Topped":
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 70f;
+                launchAngleDegrees = 4f;
+                sideAngleDegrees = 0f;
+                curveSpeedPerSecond = 0f;
+                break;
+
+            default:
+                clubHeadSpeedMph = 85f;
+                ballSpeedMph = 100f;
+                launchAngleDegrees = 15f;
+                sideAngleDegrees = 0f;
+                curveSpeedPerSecond = 0f;
+                break;
+        }
+
+        UpdateClubSpeedUI();
+        UpdateBallSpeedUI();
+        UpdateClubUI();
+        UpdateShotTypeUI();
+
+        Debug.Log("Shot preset selected: " + shotType);
+    }
+}

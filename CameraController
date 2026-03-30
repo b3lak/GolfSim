@@ -1,0 +1,196 @@
+using UnityEngine;
+
+public class CameraController : MonoBehaviour
+{
+    [Header("References")]
+    public Transform ball;
+    public Transform teeViewPoint;
+    public Transform target;
+
+    [Header("Aim")]
+    public float rotationStepDegrees = 2f;
+
+    [Header("Follow Camera")]
+    public Vector3 followOffset = new Vector3(0f, 3f, -7f);
+    public float followLerpSpeed = 8f;
+    public float followLookHeight = 0.75f;
+
+    [Header("Stopped Ball View")]
+    public Vector3 ballStopOffset = new Vector3(0f, 4f, -6f);
+    public float lookAtHeight = 0.5f;
+
+    private bool followBall = false;
+    private Rigidbody ballRb;
+
+    void Awake()
+    {
+        CacheBallRb();
+    }
+
+    void LateUpdate()
+    {
+        if (!followBall || ball == null)
+            return;
+
+        CacheBallRb();
+
+        Vector3 horizontalVelocity = Vector3.zero;
+
+        if (ballRb != null)
+        {
+            horizontalVelocity = new Vector3(ballRb.velocity.x, 0f, ballRb.velocity.z);
+        }
+
+        Vector3 behindDirection;
+
+        if (horizontalVelocity.magnitude > 0.05f)
+        {
+            behindDirection = -horizontalVelocity.normalized;
+        }
+        else
+        {
+            Vector3 flatForward = transform.forward;
+            flatForward.y = 0f;
+
+            if (flatForward.sqrMagnitude < 0.001f)
+                flatForward = Vector3.forward;
+
+            behindDirection = -flatForward.normalized;
+        }
+
+        Vector3 desiredPosition =
+            ball.position +
+            Vector3.up * followOffset.y +
+            behindDirection * Mathf.Abs(followOffset.z);
+
+        transform.position = Vector3.Lerp(
+            transform.position,
+            desiredPosition,
+            followLerpSpeed * Time.deltaTime
+        );
+
+        if (target != null)
+        {
+            transform.LookAt(target.position);
+        }
+        else
+        {
+            transform.LookAt(ball.position + Vector3.up * followLookHeight);
+        }
+    }
+
+    void CacheBallRb()
+    {
+        if (ball != null && ballRb == null)
+        {
+            ballRb = ball.GetComponent<Rigidbody>();
+        }
+    }
+
+    public void RotateAimLeft()
+    {
+        if (followBall)
+            return;
+
+        transform.Rotate(0f, -rotationStepDegrees, 0f, Space.World);
+    }
+
+    public void RotateAimRight()
+    {
+        if (followBall)
+            return;
+
+        transform.Rotate(0f, rotationStepDegrees, 0f, Space.World);
+    }
+
+    public Vector3 GetAimDirection()
+    {
+        Vector3 forward = transform.forward;
+        forward.y = 0f;
+
+        if (forward.sqrMagnitude < 0.001f)
+            return Vector3.forward;
+
+        return forward.normalized;
+    }
+
+    public void StartFollowCamera()
+    {
+        followBall = true;
+        CacheBallRb();
+    }
+
+    public void StopFollowCamera()
+    {
+        followBall = false;
+    }
+
+    public void ShowBallStopCamera(Vector3 lastBallVelocity)
+    {
+        followBall = false;
+
+        if (ball == null)
+            return;
+
+        Vector3 horizontalVelocity = new Vector3(lastBallVelocity.x, 0f, lastBallVelocity.z);
+
+        Vector3 behindDirection;
+
+        if (horizontalVelocity.magnitude > 0.05f)
+        {
+            behindDirection = -horizontalVelocity.normalized;
+        }
+        else
+        {
+            Vector3 flatForward = transform.forward;
+            flatForward.y = 0f;
+
+            if (flatForward.sqrMagnitude < 0.001f)
+                flatForward = Vector3.forward;
+
+            behindDirection = -flatForward.normalized;
+        }
+
+        Vector3 finalOffset = new Vector3(
+            behindDirection.x * Mathf.Abs(ballStopOffset.z),
+            ballStopOffset.y,
+            behindDirection.z * Mathf.Abs(ballStopOffset.z)
+        );
+
+        transform.position = ball.position + finalOffset;
+
+        if (target != null)
+        {
+            transform.LookAt(target.position);
+        }
+        else
+        {
+            transform.LookAt(ball.position + Vector3.up * lookAtHeight);
+        }
+    }
+
+    public void ResetToTeeView()
+    {
+        followBall = false;
+
+        if (teeViewPoint != null)
+        {
+            transform.position = teeViewPoint.position;
+            transform.rotation = teeViewPoint.rotation;
+        }
+    }
+
+    public void AutoAimToTarget()
+    {
+        if (target == null)
+            return;
+
+        Vector3 toTarget = target.position - transform.position;
+        toTarget.y = 0f;
+
+        if (toTarget.sqrMagnitude < 0.001f)
+            return;
+
+        transform.rotation = Quaternion.LookRotation(toTarget.normalized, Vector3.up);
+    }
+}

@@ -1,0 +1,917 @@
+# cd C:\Users\Caleb\OneDrive\Desktop\LaunchMonitor
+#streamlit run streamlit_launch_monitor.py --server.address 0.0.0.0
+
+import os
+import shutil
+from datetime import datetime
+from io import BytesIO
+import json
+
+import cv2
+import numpy as np
+import pandas as pd
+import streamlit as st
+from PIL import Image
+from skimage.metrics import structural_similarity as ssim
+import time
+
+# =========================================================
+# BASE PATHS
+# =========================================================
+BASE_DIR = r"C:\Users\Caleb\OneDrive\Desktop\LaunchMonitor"
+PHOTOS_DIR = os.path.join(BASE_DIR, "Photos")
+UPLOADS_DIR = os.path.join(PHOTOS_DIR, "uploads")
+LABELED_DIR = os.path.join(PHOTOS_DIR, "labeled")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+LOADING_VIDEO_PATH = os.path.join(ASSETS_DIR, "loading.mp4")
+
+LOG_FILE = os.path.join(LOGS_DIR, "shots.csv")
+BANNER_PATH = os.path.join(ASSETS_DIR, "slumgolf_banner.png")
+LOADING_VIDEO_PATH = os.path.join(ASSETS_DIR, "loading.mp4")
+UNITY_SHOT_FILE = r"C:/Users/Caleb/OneDrive\Desktop/LaunchMonitor/LaunchMonitorGame/ShotData/latest_shot.json"
+
+# Create folders if they do not exist
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+os.makedirs(LABELED_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(ASSETS_DIR, exist_ok=True)
+
+# =========================================================
+# SETTINGS
+# =========================================================
+IMG_SIZE = (400, 300)  # width, height
+BLUR_KERNEL = (5, 5)
+
+BASE_SMASH = {
+    "driver": 1.48,
+    "3w": 1.46,
+    "hybrid": 1.44,
+    "5i": 1.41,
+    "6i": 1.38,
+    "7i": 1.33,
+    "8i": 1.30,
+    "9i": 1.28,
+    "pw": 1.23,
+    "sw": 1.19,
+}
+CLUB_LAUNCH_ANGLES = {
+    "driver": 12.0,
+    "3w": 14.0,
+    "hybrid": 16.0,
+    "5i": 18.0,
+    "6i": 20.0,
+    "7i": 22.0,
+    "8i": 24.0,
+    "9i": 26.0,
+    "pw": 30.0,
+    "sw": 34.0,
+}
+
+STRIKE_MODIFIERS = {
+    "Strait": 1.00,
+    "Draw": 0.99,
+    "Fade": 0.98,
+    "ToeStrait": 0.94,
+    "ToeDraw": 0.93,
+    "ToeFade": 0.92,
+    "HeelStrait": 0.93,
+    "HeelDraw": 0.92,
+    "HeelFade": 0.91,
+    "ChunkStrait": 0.84,
+    "ChunkDraw": 0.85,
+    "ChunkFade": 0.83,
+    "ChunkToeStrait": 0.78,
+    "ChunkToeDraw": 0.77,
+    "ChunkToeFade": 0.76,
+    "ChunkHeelStrait": 0.77,
+    "ChunkHeelDraw": 0.76,
+    "ChunkHeelFade": 0.75,
+    "Topped": 0.65,
+}
+
+USER_LABEL_OPTIONS = [
+    "",
+    "Draw",
+    "Fade",
+    "Strait",
+    "ToeStrait",
+    "ToeDraw",
+    "ToeFade",
+    "HeelStrait",
+    "HeelDraw",
+    "HeelFade",
+    "ChunkDraw",
+    "ChunkFade",
+    "ChunkStrait",
+    "ChunkToeDraw",
+    "ChunkToeFade",
+    "ChunkToeStrait",
+    "ChunkHeelDraw",
+    "ChunkHeelFade",
+    "ChunkHeelStrait",
+    "Topped",
+]
+
+# =========================================================
+# PAGE CONFIG
+# =========================================================
+st.set_page_config(
+    page_title="SlumGolf",
+    page_icon="🏌️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# =========================================================
+# CUSTOM CSS
+# =========================================================
+
+st.markdown(
+    """
+    <style>
+        :root {
+            --bg: #111111;
+            --panel: #1a1a1a;
+            --panel-2: #222222;
+            --text: #f4efe6;
+            --muted: #c9b79e;
+            --accent: #d96b11;
+            --accent-2: #ff8c2a;
+            --border: rgba(255, 255, 255, 0.08);
+            --green: #6f8f49;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(217, 107, 17, 0.18), transparent 30%),
+                radial-gradient(circle at top right, rgba(111, 143, 73, 0.14), transparent 25%),
+                linear-gradient(180deg, #111111 0%, #171717 100%);
+            color: var(--text);
+        }
+
+        .main .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 2rem;
+            max-width: 1200px;
+        }
+
+        /* IMPORTANT: do not globally style div/span */
+        h1, h2, h3, h4, h5, h6, p, label {
+            color: var(--text) !important;
+        }
+
+        .hero-wrap {
+            background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            padding: 1.2rem;
+            box-shadow: 0 10px 35px rgba(0,0,0,0.28);
+            margin-bottom: 1rem;
+        }
+
+        .hero-subtitle {
+            text-align: center;
+            color: var(--muted) !important;
+            font-size: 1rem;
+            letter-spacing: 0.2px;
+        }
+
+        .section-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 1rem;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+            margin-bottom: 1rem;
+        }
+
+        .metric-card {
+            background: linear-gradient(180deg, rgba(217,107,17,0.13), rgba(255,255,255,0.02));
+            border: 1px solid rgba(217,107,17,0.25);
+            border-radius: 18px;
+            padding: 1rem;
+            text-align: center;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        }
+
+        .metric-label {
+            color: var(--muted) !important;
+            font-size: 0.95rem;
+            margin-bottom: 0.35rem;
+        }
+
+        .metric-value {
+            font-size: 1.9rem;
+            font-weight: 800;
+            color: #ffffff !important;
+        }
+
+        .metric-small {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #ffffff !important;
+        }
+
+        .stDownloadButton > button,
+        div[data-baseweb="select"] > div,
+        .stNumberInput input,
+        .stTextInput input {
+            border-radius: 14px !important;
+        }
+
+        /* =========================
+           NORMAL BUTTONS
+        ========================= */
+        .stButton > button {
+            background: linear-gradient(180deg, var(--accent-2), var(--accent)) !important;
+            color: black !important;
+            border: none !important;
+            font-weight: 700 !important;
+            padding: 0.65rem 1rem !important;
+            border-radius: 14px !important;
+            box-shadow: 0 8px 18px rgba(217,107,17,0.25);
+        }
+
+        .stButton > button * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        .stButton > button:hover,
+        .stButton > button:focus,
+        .stButton > button:active {
+            color: black !important;
+            background: linear-gradient(180deg, #ff9e45, #e16f0f) !important;
+        }
+
+        .stButton > button:hover *,
+        .stButton > button:focus *,
+        .stButton > button:active * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        /* =========================
+           FORM SUBMIT BUTTONS
+        ========================= */
+        div[data-testid="stFormSubmitButton"] > button {
+            background: linear-gradient(180deg, var(--accent-2), var(--accent)) !important;
+            color: black !important;
+            border: none !important;
+            font-weight: 700 !important;
+            padding: 0.65rem 1rem !important;
+            border-radius: 14px !important;
+            box-shadow: 0 8px 18px rgba(217,107,17,0.25);
+        }
+
+        div[data-testid="stFormSubmitButton"] > button * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        div[data-testid="stFormSubmitButton"] > button:hover,
+        div[data-testid="stFormSubmitButton"] > button:focus,
+        div[data-testid="stFormSubmitButton"] > button:active {
+            color: black !important;
+            background: linear-gradient(180deg, #ff9e45, #e16f0f) !important;
+        }
+
+        div[data-testid="stFormSubmitButton"] > button:hover *,
+        div[data-testid="stFormSubmitButton"] > button:focus *,
+        div[data-testid="stFormSubmitButton"] > button:active * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        /* Extra safety for base button labels */
+        button[kind="primary"],
+        button[kind="secondary"] {
+            color: black !important;
+        }
+
+        button[kind="primary"] *,
+        button[kind="secondary"] * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        /* =========================
+           FILE UPLOADER
+        ========================= */
+        div[data-testid="stFileUploader"] section {
+            background: rgba(255,255,255,0.03);
+            border-radius: 16px;
+            border: 1px dashed rgba(255,255,255,0.15);
+        }
+
+        div[data-testid="stFileUploader"] button {
+            background: #f5f5f5 !important;
+            color: black !important;
+            border: 1px solid #cccccc !important;
+        }
+
+        div[data-testid="stFileUploader"] button * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        /* =========================
+           DROPDOWNS
+        ========================= */
+        div[data-baseweb="select"] > div {
+            background-color: #f5f5f5 !important;
+            color: black !important;
+        }
+
+        div[data-baseweb="select"] * {
+            color: black !important;
+            fill: black !important;
+        }
+
+        ul[role="listbox"] {
+            background-color: #f5f5f5 !important;
+        }
+
+        ul[role="listbox"] li,
+        ul[role="listbox"] li *,
+        div[role="option"],
+        div[role="option"] * {
+            color: black !important;
+            background-color: #f5f5f5 !important;
+        }
+
+        ul[role="listbox"] li:hover,
+        ul[role="listbox"] li[aria-selected="true"],
+        div[role="option"]:hover,
+        div[role="option"][aria-selected="true"] {
+            color: black !important;
+            background-color: #dddddd !important;
+        }
+
+        /* =========================
+           INPUTS
+        ========================= */
+        .stNumberInput input,
+        .stTextInput input {
+            color: black !important;
+            background-color: #f5f5f5 !important;
+        }
+
+        div[data-testid="stDataFrame"] {
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .footer-note {
+            text-align: center;
+            color: var(--muted) !important;
+            margin-top: 1.5rem;
+            opacity: 0.9;
+            font-size: 0.95rem;
+            line-height: 1.8;
+        }
+
+        hr {
+            border-color: rgba(255,255,255,0.08);
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# =========================================================
+# HELPER FUNCTIONS
+# =========================================================
+def preprocess_cv_image(img_bgr: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, BLUR_KERNEL, 0)
+    gray = cv2.resize(gray, IMG_SIZE)
+    return gray
+
+
+def preprocess_from_path(image_path: str) -> np.ndarray:
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+    return preprocess_cv_image(img)
+
+
+def preprocess_uploaded_file(uploaded_file) -> np.ndarray:
+    pil_img = Image.open(uploaded_file).convert("RGB")
+    img_rgb = np.array(pil_img)
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    return preprocess_cv_image(img_bgr)
+
+
+def get_labeled_reference_library():
+    library = []
+
+    if not os.path.exists(LABELED_DIR):
+        return library
+
+    for label in os.listdir(LABELED_DIR):
+        label_dir = os.path.join(LABELED_DIR, label)
+
+        if not os.path.isdir(label_dir):
+            continue
+
+        for filename in os.listdir(label_dir):
+            if filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                image_path = os.path.join(label_dir, filename)
+                library.append((label, image_path))
+
+    return library
+
+### BELOW ARE THE VALUES FOR UNITY
+
+def build_unity_shot_data(
+    predicted_label: str,
+    estimated_ball_speed_mph: float,
+    club_head_speed_mph: float,
+    club: str
+):
+    """
+    Convert the app's predicted shot label + club + speeds
+    into Unity-friendly shot parameters.
+    """
+
+    base_launch = CLUB_LAUNCH_ANGLES.get(club, 18.0)
+
+    shot_data = {
+        "shotType": predicted_label,
+        "club": club,
+        "clubHeadSpeedMph": round(float(club_head_speed_mph), 2),
+        "ballSpeedMph": round(float(estimated_ball_speed_mph), 2),
+        "launchAngleDegrees": base_launch,
+        "sideAngleDegrees": 0.0,
+        "curveSpeedPerSecond": 0.0,
+    }
+
+    if predicted_label == "Strait":
+        shot_data["sideAngleDegrees"] = 0.0
+        shot_data["curveSpeedPerSecond"] = 0.0
+
+    elif predicted_label == "Draw":
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4
+
+    elif predicted_label == "Fade":
+        shot_data["sideAngleDegrees"] = -6
+        shot_data["curveSpeedPerSecond"] = 4
+
+    elif predicted_label == "ToeStrait":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = 1.0
+        shot_data["curveSpeedPerSecond"] = 2.0
+
+    elif predicted_label == "ToeDraw":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4
+
+    elif predicted_label == "ToeFade":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = -4
+        shot_data["curveSpeedPerSecond"] = 6
+
+    elif predicted_label == "HeelStrait":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = 0
+        shot_data["curveSpeedPerSecond"] = 0
+
+    elif predicted_label == "HeelDraw":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4
+
+    elif predicted_label == "HeelFade":
+        shot_data["launchAngleDegrees"] = base_launch - 1.0
+        shot_data["sideAngleDegrees"] = -6
+        shot_data["curveSpeedPerSecond"] = 4
+
+    elif predicted_label == "ChunkStrait":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 0.0
+        shot_data["curveSpeedPerSecond"] = 0.0
+
+    elif predicted_label == "ChunkDraw":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4.0
+
+    elif predicted_label == "ChunkFade":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = -6
+        shot_data["curveSpeedPerSecond"] = 4.0
+
+    elif predicted_label == "ChunkToeStrait":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 0
+        shot_data["curveSpeedPerSecond"] = 0
+
+    elif predicted_label == "ChunkToeDraw":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4.0
+
+    elif predicted_label == "ChunkToeFade":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = -6
+        shot_data["curveSpeedPerSecond"] = 4
+
+    elif predicted_label == "ChunkHeelStrait":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 0
+        shot_data["curveSpeedPerSecond"] = 0
+
+    elif predicted_label == "ChunkHeelDraw":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = 6
+        shot_data["curveSpeedPerSecond"] = -4
+
+    elif predicted_label == "ChunkHeelFade":
+        shot_data["launchAngleDegrees"] = base_launch - 2
+        shot_data["sideAngleDegrees"] = -6
+        shot_data["curveSpeedPerSecond"] = 4.0
+
+    elif predicted_label == "Topped":
+        shot_data["launchAngleDegrees"] = max(1.0, base_launch - 18.0)
+        shot_data["sideAngleDegrees"] = 0.0
+        shot_data["curveSpeedPerSecond"] = 0.0
+
+    shot_data["launchAngleDegrees"] = round(
+        max(1.0, min(shot_data["launchAngleDegrees"], 45.0)), 2
+    )
+
+    return shot_data
+
+###  ABOVE ARE THE VALUES FOR UNITY
+
+###  BELOW IS FOR WRITING THE JSON FILE
+def write_unity_shot_json(shot_data: dict, output_path: str):
+    """
+    Write the Unity shot JSON file.
+    """
+    output_dir = os.path.dirname(output_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(shot_data, f, indent=2)
+###
+
+
+
+def classify_uploaded_image(uploaded_file):
+    test_img = preprocess_uploaded_file(uploaded_file)
+    scores = []
+
+    reference_library = get_labeled_reference_library()
+
+    if not reference_library:
+        raise ValueError(
+            f"No labeled reference images found.\n"
+            f"Put images into folders like:\n{LABELED_DIR}\\Draw\\\n{LABELED_DIR}\\Fade\\"
+        )
+
+    for label, image_path in reference_library:
+        ref_img = preprocess_from_path(image_path)
+        score = ssim(test_img, ref_img)
+        scores.append((label, score, image_path))
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[0], scores
+
+
+def estimate_smash_and_ball_speed(best_label: str, club: str, club_speed_mph: float):
+    if club not in BASE_SMASH:
+        raise ValueError(f"Unknown club: {club}")
+
+    if best_label not in STRIKE_MODIFIERS:
+        raise ValueError(f"Unknown strike label: {best_label}")
+
+    baseline_smash = BASE_SMASH[club]
+    strike_modifier = STRIKE_MODIFIERS[best_label]
+    estimated_smash = baseline_smash * strike_modifier
+    estimated_ball_speed = club_speed_mph * estimated_smash
+
+    return baseline_smash, strike_modifier, estimated_smash, estimated_ball_speed
+
+
+def save_uploaded_file(uploaded_file) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = uploaded_file.name.replace(" ", "_")
+    filename = f"{timestamp}_{safe_name}"
+    save_path = os.path.join(UPLOADS_DIR, filename)
+
+    with open(save_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    return save_path
+
+
+def copy_to_labeled_folder(image_path: str, user_label: str):
+    if not user_label:
+        return
+
+    target_dir = os.path.join(LABELED_DIR, user_label)
+    os.makedirs(target_dir, exist_ok=True)
+
+    filename = os.path.basename(image_path)
+    target_path = os.path.join(target_dir, filename)
+    shutil.copy2(image_path, target_path)
+
+
+def append_to_csv(row: dict):
+    df = pd.DataFrame([row])
+
+    if os.path.exists(LOG_FILE):
+        df.to_csv(LOG_FILE, mode="a", header=False, index=False)
+    else:
+        df.to_csv(LOG_FILE, mode="w", header=True, index=False)
+
+
+# =========================================================
+# HEADER / HERO
+# =========================================================
+st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
+
+if os.path.exists(BANNER_PATH):
+    import base64
+
+def get_base64_image(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+if os.path.exists(BANNER_PATH):
+    img_base64 = get_base64_image(BANNER_PATH)
+
+    st.markdown(
+        f"""
+        <div style="display:flex; justify-content:center;">
+            <img src="data:image/png;base64,{img_base64}" 
+                 style="
+                    width:100%;
+                    max-width:700px;
+                    height:auto;
+                    object-fit:contain;
+                    margin-bottom:10px;
+                 ">
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        """
+        <div style="text-align:center; padding: 0.75rem 0 0.2rem 0;">
+            <h1 style="font-size: 3rem; margin-bottom: 0.2rem;">SlumGolf</h1>
+            <p style="font-size: 1.2rem; color: #c9b79e;">Play It Where It Lies</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.info(f"Banner not found: {BANNER_PATH}")
+
+st.markdown(
+    """
+    <div class="hero-subtitle">
+        Upload a mat photo, classify the strike, and estimate smash factor and ball speed.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# =========================================================
+# MAIN LAYOUT
+# =========================================================
+left_col, right_col = st.columns([1.1, 1], gap="large")
+
+with left_col:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Shot Input")
+
+    with st.form("shot_form"):
+        club = st.selectbox(
+            "Select club",
+            options=list(BASE_SMASH.keys()),
+            index=4
+        )
+
+        club_speed_mph = st.number_input(
+            "Club speed (mph)",
+            min_value=1.0,
+            max_value=200.0,
+            value=85.0,
+            step=0.5
+        )
+
+        uploaded_file = st.file_uploader(
+            "Upload mat photo",
+            type=["jpg", "jpeg", "png"]
+        )
+
+        user_label = st.selectbox(
+            "What do you think the shot was? (optional)",
+            options=USER_LABEL_OPTIONS,
+            index=0
+        )
+
+        submitted = st.form_submit_button("Analyze Shot")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with right_col:
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("SlumGolf Energy")
+
+    APARTMENT_IMG = os.path.join(ASSETS_DIR, "slumgolf_room.png")
+
+    if os.path.exists(APARTMENT_IMG):
+        st.image(APARTMENT_IMG, use_container_width=True)
+    else:
+        st.info("Add your apartment golf image to assets/slumgolf_room.png")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# =========================================================
+# RESULTS
+# =========================================================
+if submitted:
+    if uploaded_file is None:
+        st.error("Please upload a photo first.")
+    else:
+        loading_placeholder = st.empty()
+
+        try:
+            # Show loading video immediately after clicking Analyze Shot
+            if os.path.exists(LOADING_VIDEO_PATH):
+                with loading_placeholder.container():
+                    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                    st.subheader("Analyzing Shot...")
+                    st.video(LOADING_VIDEO_PATH, autoplay=True, muted=True, loop=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    time.sleep(8)
+            else:
+                with loading_placeholder.container():
+                    st.info("Analyzing shot...")
+
+            uploaded_bytes = uploaded_file.getvalue()
+
+            saved_path = save_uploaded_file(uploaded_file)
+
+            classification_file = BytesIO(uploaded_bytes)
+            classification_file.name = uploaded_file.name
+
+            best, all_scores = classify_uploaded_image(classification_file)
+            best_label = best[0]
+            best_score = best[1]
+            best_reference_path = best[2]
+
+            baseline_smash, strike_modifier, estimated_smash, estimated_ball_speed = (
+                estimate_smash_and_ball_speed(
+                    best_label=best_label,
+                    club=club,
+                    club_speed_mph=club_speed_mph
+                )
+            )
+            
+            ### new related to json file
+            unity_shot_data = build_unity_shot_data(
+                predicted_label=best_label,
+                estimated_ball_speed_mph=estimated_ball_speed,
+                club_head_speed_mph=club_speed_mph,
+                club=club
+            )
+
+            write_unity_shot_json(unity_shot_data, UNITY_SHOT_FILE)
+            ### 
+
+            if user_label:
+                copy_to_labeled_folder(saved_path, user_label)
+
+            log_row = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "image_path": saved_path,
+                "club": club,
+                "club_speed_mph": club_speed_mph,
+                "user_label": user_label,
+                "predicted_label": best_label,
+                "matched_reference_path": best_reference_path,
+                "match_score": round(best_score, 4),
+                "baseline_smash": round(baseline_smash, 4),
+                "strike_modifier": round(strike_modifier, 4),
+                "estimated_smash": round(estimated_smash, 4),
+                "estimated_ball_speed_mph": round(estimated_ball_speed, 2),
+            }
+            append_to_csv(log_row)
+
+            # Remove loading video once analysis is finished
+            loading_placeholder.empty()
+
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Uploaded Photo")
+            st.image(uploaded_bytes, caption="Uploaded mat image", use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            metric_cols = st.columns(4)
+            with metric_cols[0]:
+                st.markdown(
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Predicted Strike</div>
+                        <div class="metric-small">{best_label}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with metric_cols[1]:
+                st.markdown(
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Match Score</div>
+                        <div class="metric-small">{best_score:.4f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with metric_cols[2]:
+                st.markdown(
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Smash Factor</div>
+                        <div class="metric-value">{estimated_smash:.3f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            with metric_cols[3]:
+                st.markdown(
+                    f"""
+                    <div class="metric-card">
+                        <div class="metric-label">Ball Speed</div>
+                        <div class="metric-value">{estimated_ball_speed:.1f}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            detail_left, detail_right = st.columns([1, 1], gap="large")
+
+            with detail_left:
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Shot Details")
+                st.write(f"**Club:** {club}")
+                st.write(f"**Club speed:** {club_speed_mph:.1f} mph")
+                st.write(f"**Baseline smash:** {baseline_smash:.3f}")
+                st.write(f"**Strike modifier:** {strike_modifier:.3f}")
+                st.write(f"**Matched reference image:** {best_reference_path}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            with detail_right:
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Training / Logging")
+                if user_label:
+                    st.success(f"Saved to labeled training folder: {user_label}")
+                else:
+                    st.info("No user label selected, so the image was not added to a training folder.")
+                st.success(f"Shot logged to: {LOG_FILE}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("All Match Scores")
+            scores_df = pd.DataFrame(all_scores, columns=["Label", "SSIM Score", "Reference Image"])
+            st.dataframe(scores_df, use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            st.markdown("---")
+            next_col1, next_col2, next_col3 = st.columns([1, 1, 1])
+            with next_col2:
+                if st.button("Next Shot", use_container_width=True):
+                    st.rerun()
+            ### DEBUGING JSON
+            st.subheader("Unity Shot Data")
+            st.json(unity_shot_data)
+            st.success(f"Unity shot file written to: {UNITY_SHOT_FILE}")
+            ### DEBUGGING JSON
+
+
+        except Exception as e:
+            loading_placeholder.empty()
+            st.error(f"Something went wrong: {e}")
+
+st.markdown(
+    """
+    <div class="footer-note">
+        SlumGolf · Play It Where It Lies
+        <br><br>
+        • Keep camera angle consistent<br>
+        • Good lighting improves accuracy<br>
+        • Label shots to improve training<br>
+        • Gate system = future club speed input
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
